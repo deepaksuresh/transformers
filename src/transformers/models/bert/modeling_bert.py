@@ -234,6 +234,28 @@ class Grb_Embed:
         return embeddings
 
 class Grb_SelfAttention:
+    indices1 = []
+    indptr1 = []
+    for i in range(12):
+        for j in range(64):
+            start = i*9
+            end = start+8
+            indices1.extend(list(range(start,end+1)))
+    for i in range(12*64):
+        indptr1.append(i*9)
+    indptr1.append(12*64*9)
+
+    indices2 = []
+    indptr2 = []
+    for i in range(12):
+        for j in range(9):
+            start = i*64
+            end = start+63
+            indices2.extend(list(range(start,end+1)))
+    for i in range(12*9):
+        indptr2.append(i*64)
+    indptr2.append(108*64)
+
     def __init__(self, id, base_path):
         self.path = os.path.join(*[base_path, "self_att",str(id)])
         self.Key = Grb_Dense(np.load(os.path.join(self.path, "keyw.npy")), np.load(os.path.join(self.path, "keyb.npy")))
@@ -242,26 +264,57 @@ class Grb_SelfAttention:
     
     def selfAttn_forward(self, hidden_states):
         mql = self.Query.dense_forward(hidden_states)
-        ql = mql.to_dense().reshape((1,9,12,64))
-        ql = ql.transpose((0,2,1,3))
+        ql = mql.ss.split((None, 64))[0] 
+        ql = [[i.ss.reshape(1,576)] for i in ql] 
+        ql = gb.ss.concat(ql)
+        ql_vals = ql.to_values()[2]
+        ql_gb_csr = gb.Matrix(float, 108,768)
+        ql_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=ql_vals,col_indices=Grb_SelfAttention.indices2)
 
         kl = self.Key.dense_forward(hidden_states)
-        kl = kl.to_dense().reshape((1,9,12,64))
-        kl = kl.transpose((0, 2, 3, 1))
-
-        vl = self.Value.dense_forward(hidden_states)
-        vl = vl.to_dense().reshape((1,9,12,64))
-        vl = vl.transpose((0, 2, 1, 3))
-
-        attention_scores = np.matmul(ql, kl)#ql shape =  (1, 12, 9, 64)  kl shape =  (1, 12, 64, 9)  = (12, 9 ,9 )                                                 
-        attention_scores = attention_scores/8
+        klT = gb.Matrix(float,kl.ncols, kl.nrows)
+        klT << kl.T
+        klT = klT.ss.reshape(12, 576)
+        kl_vals = klT.to_values()[2]
+        kl_gb_csr = gb.Matrix(float,768, 108)
+        kl_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr1,values=kl_vals,col_indices=Grb_SelfAttention.indices1)
         
-        exp_tensor = np.exp(attention_scores-np.max(attention_scores, axis=-1, keepdims=True))
-        softmax_tensor = exp_tensor / np.sum(exp_tensor, axis=-1,keepdims=True)
+        vl = self.Value.dense_forward(hidden_states)
+        vl = vl.ss.split((None, 64))[0] 
+        vl = [[i.ss.reshape(1,576)] for i in vl] 
+        vl = gb.ss.concat(vl)
+        vl_vals = vl.to_values()[2]
+        vl_gb_csr = gb.Matrix(float, 108,768)
+        vl_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=vl_vals,col_indices=Grb_SelfAttention.indices2)
 
-        context_layer = np.matmul(softmax_tensor, vl) #context_layer (1, 12, 9, 64) ,softmax shape =  (1, 12, 9, 9)  vl shape =  (1, 12, 9, 64)  
-        context_layer = context_layer.transpose((0, 2, 1, 3))
-        context_layer = context_layer.reshape((1,9,768))
+        attention_scores_gb_csr = gb.Matrix(float,108,108)
+        attention_scores_gb_csr << gb.semiring.plus_times(ql_gb_csr@kl_gb_csr) 
+        attention_scores_gb_csr << attention_scores_gb_csr /8.0
+
+        maxes = gb.Vector(float, attention_scores_gb_csr.nrows)
+        maxes << attention_scores_gb_csr.reduce_rowwise("max")
+        attn_maxes_gb = gb.ss.diag(maxes)
+        exp_tensor_gb = gb.Matrix(float, 108,108)
+        exp_tensor_gb<<gb.semiring.plus_minus(attn_maxes_gb@attention_scores_gb_csr)
+        exp_tensor_gb << exp_tensor_gb * -1
+        exp_tensor_gb = gb.unary.exp(exp_tensor_gb)
+
+        row_sum = gb.Vector(float, exp_tensor_gb.nrows)
+        row_sum << exp_tensor_gb.reduce_rowwise("plus")
+        sum_diag = gb.ss.diag(row_sum)
+        sum_diag << 1.0/sum_diag
+        softmax_gb = gb.Matrix(float, 108,108)
+        softmax_gb<<gb.semiring.plus_times(sum_diag@exp_tensor_gb)
+
+        context_layer_gb_csr = gb.Matrix(float,108,768)
+        context_layer_gb_csr << gb.semiring.plus_times(softmax_gb @ vl_gb_csr)
+        c_vals = context_layer_gb_csr.ss.unpack()["values"]
+
+        context_layer = gb.Matrix(float,12,576)
+        context_layer.ss.pack_fullr(c_vals)
+        context_layer = context_layer.ss.split((None, 64))[0]
+        context_layer = [[i.ss.reshape(1,768)] for i in context_layer] 
+        context_layer = gb.ss.concat(context_layer)
         return (context_layer)
 
 class Grb_Attention:
@@ -274,8 +327,9 @@ class Grb_Attention:
         self_outputs = self.self.selfAttn_forward(hidden_states)
 
         # self_outputs = (torch.from_numpy(self_outputs[0]).float(),)# output is in npy
-        x = gb.Matrix.from_dense(self_outputs[0])
-        attention_output = self.output.selfOut_forward(x,hidden_states)
+        # x = gb.Matrix.from_dense(self_outputs[0])
+        # attention_output = self.output.selfOut_forward(x,hidden_states)
+        attention_output = self.output.selfOut_forward(self_outputs,hidden_states)
 
         # attention_output = torch.from_numpy(np.expand_dims(attention_output.to_dense(), axis=0)).float()
         outputs = (attention_output,)# + self_outputs[1:]  # add attentions if we output them ()
