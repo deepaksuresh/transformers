@@ -125,7 +125,7 @@ class Grb_Inter:
 
 class Grb_Dense:
     def __init__(self,w, b):
-        self.w = gb.Matrix.from_dense(w)
+        self.w = gb.Matrix.from_dense(w, missing_value=0)
         vec = gb.Vector.from_dense(np.ones(9)) #9 is the seq_length
         b = gb.Vector.from_dense(b)
         self.b = gb.Matrix(float, 9, self.w.nrows) #converting bias vector to a matrix
@@ -133,7 +133,8 @@ class Grb_Dense:
     
     def dense_forward(self, x):
         # x  = gb.Matrix.from_dense(x)
-        hw = gb.Matrix(float, x.nrows, self.w.nrows)
+        hw = gb.Matrix(gb.dtypes.FP32, x.nrows, self.w.nrows)
+        hw<<0
         hw << gb.semiring.plus_times(x@self.w.T)
         hw << hw+self.b
         return hw
