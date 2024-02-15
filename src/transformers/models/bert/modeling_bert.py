@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """PyTorch BERT model."""
-from scipy.io import mmwrite
 import numpy as np
 import math
 import os
@@ -104,10 +103,14 @@ BERT_PRETRAINED_MODEL_ARCHIVE_LIST = [
 
 import graphblas as gb
 
-from math import erf as math_erf
-erf = np.vectorize(math_erf)
 def my_gelu(z):
-    return 0.5 * z * (1 + erf(z / np.sqrt(2)))
+    """0.5 * z * (1 + unary.ss.erf(z / 2**0.5))"""
+    rv = (z / 2**0.5).new()
+    rv << gb.unary.ss.erf(rv)
+    rv += 1
+    rv *= z
+    rv *= 0.5
+    return rv
 
 class Grb_Inter:
     def __init__(self, id, base_path):
@@ -117,9 +120,7 @@ class Grb_Inter:
     
     def inter_forward(self, hidden_states):
         hidden_states = self.Dense.dense_forward(hidden_states)
-        hidden_states = hidden_states.to_dense()#hack
         hidden_states = self.Gelu(hidden_states)
-        hidden_states = gb.Matrix.from_dense(hidden_states)
         return hidden_states
 
 class Grb_Dense:
