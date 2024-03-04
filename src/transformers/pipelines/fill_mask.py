@@ -6,12 +6,6 @@ from ..utils import add_end_docstrings, is_tf_available, is_torch_available, log
 from .base import PIPELINE_INIT_ARGS, GenericTensor, Pipeline, PipelineException
 
 
-if is_tf_available():
-    import tensorflow as tf
-
-    from ..tf_utils import stable_softmax
-
-
 if is_torch_available():
     import torch
 
