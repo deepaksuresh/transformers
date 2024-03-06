@@ -321,8 +321,8 @@ class Grb_SelfAttention:
 
 class Grb_Attention:
     def __init__(self, id):
-        self.self = Grb_SelfAttention(id, "/home/grads/d/deepaksuresh/weights/attention")
-        self.output = Grb_SelfOut(id, "/home/grads/d/deepaksuresh/weights/attention")
+        self.self = Grb_SelfAttention(id, "./weights/attention")
+        self.output = Grb_SelfOut(id, "./weights/attention")
     
     def attn_forward(self, hidden_states):
         # hidden_states = gb.Matrix.from_dense(hidden_states[0])
@@ -340,8 +340,8 @@ class Grb_Attention:
 class Grb_Layer:
     def __init__(self, id):
         self.attention = Grb_Attention(id)
-        self.intermediate = Grb_Inter(id, "/home/grads/d/deepaksuresh/weights/layer/self_inter")
-        self.output = Grb_Out(id, "/home/grads/d/deepaksuresh/weights/layer/self_out")
+        self.intermediate = Grb_Inter(id, "./weights/layer/self_inter")
+        self.output = Grb_Out(id, "./weights/layer/self_out")
     
     def layer_forward(self, hidden_states):
         self_attention_outputs = self.attention.attn_forward(hidden_states)
@@ -960,7 +960,7 @@ class BertModel(BertPreTrainedModel):
         # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
         head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
 
-        embedder = Grb_Embed("/home/grads/d/deepaksuresh/weights/embedding")
+        embedder = Grb_Embed("./weights/embedding")
         from time import time
         start = time()
         embedding_output = embedder.embed_forward(input_ids, token_type_ids, position_ids, inputs_embeds, past_key_values_length)
