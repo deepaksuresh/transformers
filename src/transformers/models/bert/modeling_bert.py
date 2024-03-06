@@ -269,7 +269,7 @@ class Grb_SelfAttention:
         ql = mql.ss.split((None, 64))[0] 
         ql = [[i.ss.reshape(1,576)] for i in ql] 
         ql = gb.ss.concat(ql)
-        ql_vals = ql.to_values()[2]
+        ql_vals = ql.to_coo()[2]
         ql_gb_csr = gb.Matrix(float, 108,768)
         ql_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=ql_vals,col_indices=Grb_SelfAttention.indices2)
 
