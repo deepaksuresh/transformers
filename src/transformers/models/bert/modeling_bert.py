@@ -301,7 +301,7 @@ class Grb_SelfAttention:
         ql = mql.ss.split((None, 64))[0] 
         ql = [[i.ss.reshape(1,576)] for i in ql] 
         ql = gb.ss.concat(ql)
-        ql_vals = ql.to_values()[2]
+        ql_vals = ql.to_coo()[2]
         ql_gb_csr = gb.Matrix(gb.dtypes.FP32, 108,768)
         ql_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=ql_vals,col_indices=Grb_SelfAttention.indices2)
 
@@ -309,7 +309,7 @@ class Grb_SelfAttention:
         klT = gb.Matrix(gb.dtypes.FP32,kl.ncols, kl.nrows)
         klT << kl.T
         klT = klT.ss.reshape(12, 576)
-        kl_vals = klT.to_values()[2]
+        kl_vals = klT.to_coo()[2]
         kl_gb_csr = gb.Matrix(gb.dtypes.FP32,768, 108)
         kl_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr1,values=kl_vals,col_indices=Grb_SelfAttention.indices1)
         
@@ -317,7 +317,7 @@ class Grb_SelfAttention:
         vl = vl.ss.split((None, 64))[0] 
         vl = [[i.ss.reshape(1,576)] for i in vl] 
         vl = gb.ss.concat(vl)
-        vl_vals = vl.to_values()[2]
+        vl_vals = vl.to_coo()[2]
         vl_gb_csr = gb.Matrix(gb.dtypes.FP32, 108,768)
         vl_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=vl_vals,col_indices=Grb_SelfAttention.indices2)
 
