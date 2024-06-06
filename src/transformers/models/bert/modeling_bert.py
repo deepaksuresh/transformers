@@ -996,7 +996,7 @@ class BertModel(BertPreTrainedModel):
         encoder = Grb_Encoder()
         encoder_outputs = encoder.enc_forward(embedding_output)
         stop = time()
-        print("It took ", stop-start)# It took  0.7571496963500977
+        #print("It took ", stop-start)# It took  0.7571496963500977
         sequence_output = torch.from_numpy(np.expand_dims(encoder_outputs.to_dense(), axis=0)).float()
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
