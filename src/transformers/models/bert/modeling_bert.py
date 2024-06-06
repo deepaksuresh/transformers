@@ -101,7 +101,20 @@ BERT_PRETRAINED_MODEL_ARCHIVE_LIST = [
     # See all BERT models at https://huggingface.co/models?filter=bert
 ]
 
+###### GRAPHBLAS INFERENCE STARTS HERE ############
 import graphblas as gb
+import sysconfig
+#gb.ss.config["burble"] = True
+gb.ss.config['jit_c_control'] = 'on'
+gb.ss.config['jit_c_compiler_name'] = sysconfig.get_config_var('CC')
+gb.ss.config['jit_c_compiler_flags'] = sysconfig.get_config_var('CFLAGS') + f" -fPIC -fopenmp"
+gb.ss.config['jit_c_libraries'] = sysconfig.get_config_var('LIBS')
+gb.ss.config['jit_c_preface'] = '#include <math.h>'
+#cdef = "void gelu_times(float *rv, float *z, float *y) { float zz = (*z) ; float yy = (*y) ; (*rv) = (erf(zz / sqrt(2.0)) + 1) * zz *.5 * yy ; };"
+cdef = "void gelu(float *rv, float *z) { float zz = (*z) ; (*rv) = (erf(zz / 1.41421356) + 1) * zz *.5; };"
+# gb.binary.ss.register_new("gelu_times", cdef, left_type="FP32", right_type="FP32",  ret_type="FP32")
+# gb.core.operator.Semiring.register_new("plus_gelutimes", gb.monoid.plus, gb.binary.ss.gelu_times)
+gelu = gb.unary.ss.register_new("gelu", cdef, "FP32", "FP32")
 
 def my_gelu(z):
     """0.5 * z * (1 + unary.ss.erf(z / 2**0.5))"""
@@ -111,12 +124,27 @@ def my_gelu(z):
     rv *= z
     rv *= 0.5
     return rv
+#replace with a single call, multiple calls to apply now
+#
+class Grb_DenseGelu:
+    def __init__(self,w, b):
+        self.w = gb.Matrix.from_dense(w, missing_value=0)
+        b = gb.Vector.from_dense(b)
+        self.b = gb.ss.diag(b)
+
+    def denseGelu_forward(self, x):
+        hw = gb.Matrix(gb.dtypes.FP32, x.nrows, self.w.nrows)
+        hw << 0
+        hw(gb.binary.plus["FP32"]) << gb.semiring.plus_gelutimes(x@self.w.T)
+        hw << gb.semiring.plus_plus(hw@self.b)
+        return hw
 
 class Grb_Inter:
+    
     def __init__(self, id, base_path):
         self.path = os.path.join(base_path, str(id))
         self.Dense = Grb_Dense(np.load(os.path.join(self.path, "densew.npy")), np.load(os.path.join(self.path, "denseb.npy")))
-        self.Gelu = my_gelu
+        self.Gelu = my_gelu#gelu
     
     def inter_forward(self, hidden_states):
         hidden_states = self.Dense.dense_forward(hidden_states)
@@ -124,22 +152,22 @@ class Grb_Inter:
         return hidden_states
 
 class Grb_Dense:
+    
     def __init__(self,w, b):
         self.w = gb.Matrix.from_dense(w, missing_value=0)
-        vec = gb.Vector.from_dense(np.ones(9)) #9 is the seq_length
         b = gb.Vector.from_dense(b)
-        self.b = gb.Matrix(float, 9, self.w.nrows) #converting bias vector to a matrix
-        self.b << vec.outer(b, op=gb.binary.times)
+        self.b = gb.ss.diag(b)
     
+
     def dense_forward(self, x):
-        # x  = gb.Matrix.from_dense(x)
         hw = gb.Matrix(gb.dtypes.FP32, x.nrows, self.w.nrows)
-        hw<<0
-        hw << gb.semiring.plus_times(x@self.w.T)
-        hw << hw+self.b
+        hw << 0
+        hw(gb.binary.plus["FP32"]) << gb.semiring.plus_times(x@self.w.T)
+        hw << gb.semiring.plus_plus(hw@self.b)
         return hw
 
 class Grb_SelfOut:
+    
     def __init__(self, id, base_path):
         self.path = os.path.join(*[base_path, "self_out",str(id)])
         self.Dense = Grb_Dense(np.load(os.path.join(self.path, "densew.npy")), np.load(os.path.join(self.path, "denseb.npy")))
@@ -147,14 +175,16 @@ class Grb_SelfOut:
         lnormb = gb.Vector.from_dense(np.load(os.path.join(self.path, "lnormb.npy")))
         self.LayerNorm = Grb_LayerNorm(lnormw, lnormb)
     
+    
     def selfOut_forward(self, hidden_states, input_tensor):
         hidden_states = self.Dense.dense_forward(hidden_states)
-        x = gb.Matrix(float, hidden_states.nrows, hidden_states.ncols)
+        x = gb.Matrix(gb.dtypes.FP32, hidden_states.nrows, hidden_states.ncols)
         x << hidden_states.ewise_add(input_tensor)
         hidden_states = self.LayerNorm.lnorm_forward(x)
         return hidden_states
 
 class Grb_Out:
+    
     def __init__(self, id, base_path):
         self.path = os.path.join(base_path, str(id))
         self.Dense = Grb_Dense(np.load(os.path.join(self.path, "densew.npy")), np.load(os.path.join(self.path, "denseb.npy")))
@@ -162,46 +192,45 @@ class Grb_Out:
         lnormb = gb.Vector.from_dense(np.load(os.path.join(self.path, "lnormb.npy")))
         self.LayerNorm = Grb_LayerNorm(lnormw, lnormb)
     
+    
     def out_forward(self, hidden_states, input_tensor):
         hidden_states = self.Dense.dense_forward(hidden_states)
-        x = gb.Matrix(float, hidden_states.nrows, hidden_states.ncols)
+        x = gb.Matrix(gb.dtypes.FP32, hidden_states.nrows, hidden_states.ncols)
         x << hidden_states.ewise_add(input_tensor)
         hidden_states = self.LayerNorm.lnorm_forward(x)
         return hidden_states
         
 class Grb_LayerNorm:
+    
     def __init__(self,lnormw, lnormb):
         self.lnormw = lnormw
         self.lnormb = lnormb
+    
+    
     def lnorm_forward(self, x):
-        vec = gb.Vector.from_dense(np.ones(x.ncols)/x.ncols)
-        w = gb.Vector(float, x.nrows)
+        vec = gb.Vector('float32', x.ncols)
+        vec << 1.0/x.ncols
+        w = gb.Vector(gb.dtypes.FP32, x.nrows)
         w << x.mxv(vec, op="plus_times")
-        means = gb.Matrix.from_dense(-1*w.to_coo()[1].reshape(x.nrows,1) * np.ones((x.nrows,x.ncols)))
-        emb_means = gb.Matrix(float,x.nrows, x.ncols)
-        emb_means << x.ewise_add(means)
-        emb_means_sqr = gb.Matrix(float,x.nrows, x.ncols)
-        emb_means_sqr << emb_means.ewise_mult(emb_means)
-        var = gb.Vector(float, x.nrows)
-        var << emb_means_sqr.mxv(vec, op="plus_times")
-        vec = gb.Vector.from_dense(np.ones(x.ncols))
-        means_mat = gb.Matrix(float,x.nrows,x.ncols)
-        means_mat << w.outer(vec, op=gb.binary.times)
-        vec = gb.Vector.from_dense(np.ones(x.ncols))
-        vars_mat = gb.Matrix(float,x.nrows,x.ncols)
-        vars_mat << var.outer(vec, op=gb.binary.times)
-        vars_mat << vars_mat + 1e-12
-        x << (x-means_mat)/ (vars_mat)**0.5
-        vec = gb.Vector.from_dense(np.ones(x.nrows))
-        self.lnormw_mat = gb.Matrix(float,x.nrows,x.ncols)
-        self.lnormb_mat = gb.Matrix(float,x.nrows,x.ncols)
-        self.lnormw_mat<<vec.outer(self.lnormw, op=gb.binary.times)
-        self.lnormb_mat<<vec.outer(self.lnormb, op=gb.binary.times)
-        x << self.lnormw_mat.ewise_mult(x)
-        x << self.lnormb_mat.ewise_add(x)
+        means = gb.ss.diag(-w)
+        emb_means = gb.Matrix(gb.dtypes.FP32,x.nrows, x.ncols)
+        emb_means << 0
+        emb_means(gb.binary.plus["FP32"]) << gb.semiring.plus_plus(means@x)
+        emb_means = emb_means**2
+        var = gb.Vector(gb.dtypes.FP32, x.nrows)
+        var << emb_means.mxv(vec, op="plus_times")
+        var << var + 1e-12
+        x << gb.semiring.plus_plus(means@x)
+        vars_diag = gb.ss.diag(1.0/(var**0.5))
+        x << gb.semiring.plus_times(vars_diag@x)
+        self.lnormw_diag = gb.ss.diag(self.lnormw)
+        self.lnormb_diag = gb.ss.diag(self.lnormb)
+        x << gb.semiring.plus_times(x@self.lnormw_diag)
+        x << gb.semiring.plus_plus(x@self.lnormb_diag)
         return x
 
 class Grb_Embed:
+    
     def __init__(self,path):
         self.word_embeddings = gb.Matrix.from_dense(np.load(os.path.join(path, "word_embeddings.npy")))
         self.position_embeddings = gb.Matrix.from_dense(np.load(os.path.join(path, "position_embeddings.npy")))
@@ -212,6 +241,7 @@ class Grb_Embed:
         self.position_ids = list(range(512)) #
         self.token_type_ids = [0] * 512
 
+    
     def embed_forward(self, input_ids = None, token_type_ids = None, position_ids = None, inputs_embeds = None, past_key_values_length = 0):
         input_ids = input_ids[0].tolist()
         seq_length = len(input_ids)
@@ -219,17 +249,17 @@ class Grb_Embed:
             position_ids = self.position_ids[past_key_values_length : seq_length + past_key_values_length]
 
         if inputs_embeds is None:
-            inputs_embeds = gb.Matrix(float, seq_length, self.word_embeddings.ncols)
+            inputs_embeds = gb.Matrix(gb.dtypes.FP32, seq_length, self.word_embeddings.ncols)
             inputs_embeds << self.word_embeddings[input_ids,:]
 
         token_type_ids = token_type_ids[0].tolist()
-        token_type_embeddings = gb.Matrix(float, seq_length, self.token_type_embeddings.ncols)
+        token_type_embeddings = gb.Matrix(gb.dtypes.FP32, seq_length, self.token_type_embeddings.ncols)
         token_type_embeddings << self.token_type_embeddings[token_type_ids,:]
 
-        embeddings = gb.Matrix(float, seq_length, self.word_embeddings.ncols)
+        embeddings = gb.Matrix(gb.dtypes.FP32, seq_length, self.word_embeddings.ncols)
         embeddings << inputs_embeds.ewise_add(token_type_embeddings)
 
-        position_embeddings = gb.Matrix(float, seq_length, self.position_embeddings.ncols)
+        position_embeddings = gb.Matrix(gb.dtypes.FP32, seq_length, self.position_embeddings.ncols)
         position_embeddings << self.position_embeddings[position_ids, :]
         embeddings << embeddings.ewise_add(position_embeddings)
         embeddings = self.LayerNorm.lnorm_forward(embeddings)
@@ -258,90 +288,90 @@ class Grb_SelfAttention:
         indptr2.append(i*64)
     indptr2.append(108*64)
 
+    
     def __init__(self, id, base_path):
         self.path = os.path.join(*[base_path, "self_att",str(id)])
         self.Key = Grb_Dense(np.load(os.path.join(self.path, "keyw.npy")), np.load(os.path.join(self.path, "keyb.npy")))
         self.Query = Grb_Dense(np.load(os.path.join(self.path, "queryw.npy")), np.load(os.path.join(self.path, "queryb.npy")))
         self.Value = Grb_Dense(np.load(os.path.join(self.path, "valuew.npy")), np.load(os.path.join(self.path, "valueb.npy")))
     
+    
     def selfAttn_forward(self, hidden_states):
         mql = self.Query.dense_forward(hidden_states)
         ql = mql.ss.split((None, 64))[0] 
         ql = [[i.ss.reshape(1,576)] for i in ql] 
         ql = gb.ss.concat(ql)
-        ql_vals = ql.to_coo()[2]
-        ql_gb_csr = gb.Matrix(float, 108,768)
+        ql_vals = ql.to_values()[2]
+        ql_gb_csr = gb.Matrix(gb.dtypes.FP32, 108,768)
         ql_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=ql_vals,col_indices=Grb_SelfAttention.indices2)
 
         kl = self.Key.dense_forward(hidden_states)
-        klT = gb.Matrix(float,kl.ncols, kl.nrows)
+        klT = gb.Matrix(gb.dtypes.FP32,kl.ncols, kl.nrows)
         klT << kl.T
         klT = klT.ss.reshape(12, 576)
-        kl_vals = klT.to_coo()[2]
-        kl_gb_csr = gb.Matrix(float,768, 108)
+        kl_vals = klT.to_values()[2]
+        kl_gb_csr = gb.Matrix(gb.dtypes.FP32,768, 108)
         kl_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr1,values=kl_vals,col_indices=Grb_SelfAttention.indices1)
         
         vl = self.Value.dense_forward(hidden_states)
         vl = vl.ss.split((None, 64))[0] 
         vl = [[i.ss.reshape(1,576)] for i in vl] 
         vl = gb.ss.concat(vl)
-        vl_vals = vl.to_coo()[2]
-        vl_gb_csr = gb.Matrix(float, 108,768)
+        vl_vals = vl.to_values()[2]
+        vl_gb_csr = gb.Matrix(gb.dtypes.FP32, 108,768)
         vl_gb_csr.ss.pack_csr(indptr=Grb_SelfAttention.indptr2,values=vl_vals,col_indices=Grb_SelfAttention.indices2)
 
-        attention_scores_gb_csr = gb.Matrix(float,108,108)
+        attention_scores_gb_csr = gb.Matrix(gb.dtypes.FP32,108,108)
         attention_scores_gb_csr << gb.semiring.plus_times(ql_gb_csr@kl_gb_csr) 
         attention_scores_gb_csr << attention_scores_gb_csr /8.0
 
-        maxes = gb.Vector(float, attention_scores_gb_csr.nrows)
+        maxes = gb.Vector(gb.dtypes.FP32, attention_scores_gb_csr.nrows)
         maxes << attention_scores_gb_csr.reduce_rowwise("max")
         attn_maxes_gb = gb.ss.diag(maxes)
-        exp_tensor_gb = gb.Matrix(float, 108,108)
+        exp_tensor_gb = gb.Matrix(gb.dtypes.FP32, 108,108)
         exp_tensor_gb<<gb.semiring.plus_minus(attn_maxes_gb@attention_scores_gb_csr)
         exp_tensor_gb << exp_tensor_gb * -1
         exp_tensor_gb = gb.unary.exp(exp_tensor_gb)
 
-        row_sum = gb.Vector(float, exp_tensor_gb.nrows)
+        row_sum = gb.Vector(gb.dtypes.FP32, exp_tensor_gb.nrows)
         row_sum << exp_tensor_gb.reduce_rowwise("plus")
         sum_diag = gb.ss.diag(row_sum)
         sum_diag << 1.0/sum_diag
-        softmax_gb = gb.Matrix(float, 108,108)
+        softmax_gb = gb.Matrix(gb.dtypes.FP32, 108,108)
         softmax_gb<<gb.semiring.plus_times(sum_diag@exp_tensor_gb)
 
-        context_layer_gb_csr = gb.Matrix(float,108,768)
+        context_layer_gb_csr = gb.Matrix(gb.dtypes.FP32,108,768)
         context_layer_gb_csr << gb.semiring.plus_times(softmax_gb @ vl_gb_csr)
         c_vals = context_layer_gb_csr.ss.unpack()["values"]
 
-        context_layer = gb.Matrix(float,12,576)
+        context_layer = gb.Matrix(gb.dtypes.FP32,12,576)
         context_layer.ss.pack_fullr(c_vals)
         context_layer = context_layer.ss.split((None, 64))[0]
         context_layer = [[i.ss.reshape(1,768)] for i in context_layer] 
         context_layer = gb.ss.concat(context_layer)
         return (context_layer)
 
+
 class Grb_Attention:
+    
     def __init__(self, id):
         self.self = Grb_SelfAttention(id, "./weights/attention")
         self.output = Grb_SelfOut(id, "./weights/attention")
     
     def attn_forward(self, hidden_states):
-        # hidden_states = gb.Matrix.from_dense(hidden_states[0])
         self_outputs = self.self.selfAttn_forward(hidden_states)
-
-        # self_outputs = (torch.from_numpy(self_outputs[0]).float(),)# output is in npy
-        # x = gb.Matrix.from_dense(self_outputs[0])
-        # attention_output = self.output.selfOut_forward(x,hidden_states)
         attention_output = self.output.selfOut_forward(self_outputs,hidden_states)
-
-        # attention_output = torch.from_numpy(np.expand_dims(attention_output.to_dense(), axis=0)).float()
         outputs = (attention_output,)# + self_outputs[1:]  # add attentions if we output them ()
         return outputs
 
+
 class Grb_Layer:
+    
     def __init__(self, id):
         self.attention = Grb_Attention(id)
         self.intermediate = Grb_Inter(id, "./weights/layer/self_inter")
         self.output = Grb_Out(id, "./weights/layer/self_out")
+    
     
     def layer_forward(self, hidden_states):
         self_attention_outputs = self.attention.attn_forward(hidden_states)
@@ -352,21 +382,19 @@ class Grb_Layer:
 
         return outputs
     
+    
     def feed_forward_chunk(self, attention_output):#this can be parallelized as in the transformers implementation
-
-        # attention_output = gb.Matrix.from_dense(attention_output[0])
         intermediate_output = self.intermediate.inter_forward(attention_output)
-
-        # intermediate_output = torch.from_numpy(np.expand_dims(intermediate_output, axis=0)).float()#hack, output is npy
-        # intermediate_output = gb.Matrix.from_dense(intermediate_output[0])
         layer_output = self.output.out_forward(intermediate_output, attention_output)
-        # layer_output = torch.from_numpy(np.expand_dims(layer_output.to_dense(), axis=0)).float() #hack
         return layer_output
 
+
 class Grb_Encoder:
+    
     def __init__(self):
         self.layer = [Grb_Layer(id) for id in range(12)]
-
+    
+    
     def enc_forward(self, hidden_states):
         for i, layer_module in enumerate(self.layer):
             layer_outputs = layer_module.layer_forward(
@@ -375,6 +403,7 @@ class Grb_Encoder:
             hidden_states = layer_outputs[0]
         return hidden_states
 
+###### GRAPHBLAS INFERENCE ENDS HERE ############
         
 def load_tf_weights_in_bert(model, config, tf_checkpoint_path):
     """Load tf checkpoints in a pytorch model."""
@@ -964,12 +993,10 @@ class BertModel(BertPreTrainedModel):
         from time import time
         start = time()
         embedding_output = embedder.embed_forward(input_ids, token_type_ids, position_ids, inputs_embeds, past_key_values_length)
-        # embedding_output = torch.from_numpy(np.expand_dims(embedding_output.to_dense(), axis=0)).float()
         encoder = Grb_Encoder()
         encoder_outputs = encoder.enc_forward(embedding_output)
         stop = time()
-        #print("It took ", stop-start)# It took  0.7571496963500977
-        # sequence_output = torch.from_numpy(np.expand_dims(encoder_outputs[0], axis=0)).float()
+        print("It took ", stop-start)# It took  0.7571496963500977
         sequence_output = torch.from_numpy(np.expand_dims(encoder_outputs.to_dense(), axis=0)).float()
         pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
 
