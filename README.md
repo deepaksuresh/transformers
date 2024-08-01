@@ -5,3 +5,4 @@ tation of GraphBLAS, offers a robust framework tailored for leveraging sparsity 
 putations. This work explores the application of SuiteSparse:GraphBLAS in performing inference tasks, particularly focusing on the language model BERT.
 This work implements a complete inference pipeline using SuiteSparse:GraphBLAS. [Click here for a demo](https://colab.research.google.com/drive/13YwlILu4FNA2aXbTF86T991XAZYorsBq?usp=sharing)
 
+The inference engine and the semi-ring formualtion of LLM inference can be found in the file [modeling_bert.py](https://github.com/deepaksuresh/transformers/blob/main/src/transformers/models/bert/modeling_bert.py)
